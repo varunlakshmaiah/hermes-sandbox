@@ -1,0 +1,22 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /workspace/.ssh/ssh_host_ed25519_key
+PidFile /tmp/sshd.pid
+AuthorizedKeysFile /run/hermes-public/authorized_keys
+AllowUsers sandbox
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+UsePAM no
+StrictModes yes
+DisableForwarding yes
+PermitTTY no
+PermitUserEnvironment no
+PermitUserRC no
+UseDNS no
+PrintMotd no
+LogLevel VERBOSE
+Subsystem sftp internal-sftp

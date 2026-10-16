@@ -1,0 +1,73 @@
+services:
+  hermes-gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway.Dockerfile
+      args:
+        HERMES_IMAGE: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_UID: "10000"
+      HERMES_GID: "10000"
+      TERMINAL_ENV: ssh
+      TERMINAL_SSH_HOST: hermes-sandbox
+      TERMINAL_SSH_PORT: "2222"
+      TERMINAL_SSH_USER: sandbox
+      TERMINAL_SSH_KEY: /opt/data/.ssh/id_ed25519
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8000"
+      HERMES_DASHBOARD: "false"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - hermes_data:/opt/data
+      - hermes_skills:/opt/data/skills
+      - hermes_public_keys:/run/hermes-public
+    depends_on:
+      hermes-sandbox:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/opt/hermes/.venv/bin/python", "/opt/deployment/gateway.py", "health"]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+    stop_grace_period: 60s
+
+  hermes-sandbox:
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+    user: "10000:10000"
+    init: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    mem_limit: 2G
+    cpus: 2.0
+    pids_limit: 256
+    volumes:
+      - hermes_workspace:/workspace
+      - hermes_skills:/workspace/skills
+      - hermes_public_keys:/run/hermes-public:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ssh-keyscan -t ed25519 -T 3 -p 2222 127.0.0.1 2>/dev/null | grep -q ssh-ed25519"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
+    stop_grace_period: 15s
+
+volumes:
+  hermes_data:
+  hermes_skills:
+  hermes_workspace:
+  hermes_public_keys:
