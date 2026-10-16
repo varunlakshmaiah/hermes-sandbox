@@ -190,11 +190,12 @@ Do not disable host-key checks to work around an unexpected mismatch.
 ```sh
 python3 -m pip install -r tests/requirements.txt
 python3 -m unittest discover -s tests -v
-docker compose --env-file .env.example config --no-env-resolution --quiet
+docker compose config --quiet
 python3 tests/smoke.py
 ```
 
-The smoke test uses an isolated Compose project, synthetic credentials, and no
+The configuration check expects `.env` from deployment step 1; it prints no
+expanded credentials. The smoke test uses an isolated Compose project, synthetic credentials, and no
 paid model calls. It checks real SSH execution through Hermes' backend, API
 authentication and token generation/rotation, secret isolation,
 non-root/capability/resource settings, and

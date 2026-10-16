@@ -22,6 +22,7 @@ jobs:
       - name: Unit and configuration checks
         run: |
           python -m unittest discover -s tests -v
-          docker compose --env-file .env.example config --no-env-resolution --quiet
+          cp .env.example .env
+          docker compose config --quiet
       - name: Container smoke test (synthetic credentials only)
         run: python tests/smoke.py
