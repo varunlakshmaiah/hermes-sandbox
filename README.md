@@ -6,6 +6,61 @@ Two containers, automatic SSH keys, persistent named volumes, and no Docker sock
 The gateway runs [NousResearch's Hermes Agent](https://github.com/NousResearch/hermes-agent);
 terminal commands run in a separate, resource-limited Python sandbox.
 
+## Project goal
+
+**To securely build and test Hermes skills and save them to the Git repository.**
+
+Use this project as a repeatable skill-development workspace: ask Hermes to
+create or improve a skill, exercise its scripts in the constrained execution
+container, inspect the results, and commit the reviewed skill to your own Git
+repository. The isolation reduces risk during development; it is not a guarantee
+that arbitrary code or prompt-injected tasks are safe.
+
+### Other use cases
+
+| Use case | How this deployment helps |
+| --- | --- |
+| Skill prototyping and regression testing | Iterate on skill instructions, Python helpers, and fixtures without running terminal commands directly in the credential-holding gateway. |
+| Reviewing third-party skills | Inspect and test unfamiliar skill code with non-root execution and CPU/RAM/process limits before deciding whether to trust it. Use a VM for genuinely hostile code. |
+| Data-processing experiments | Test parsers, converters, and small analysis scripts against non-sensitive sample data in a persistent workspace. |
+| API-driven automation | Connect an OpenAI-compatible client to the authenticated API to run repeatable development and testing tasks. |
+| Discord-assisted development | Use an access-controlled bot to request skill changes and test runs while retaining a host-side review and publishing step. |
+| Self-hosted skill libraries | Keep skills across container restarts and export reviewed versions into Git for change history, collaboration, and rollback. |
+
+### Save reviewed skills to Git
+
+Skills persist in the `hermes_skills` named volume, visible at
+`/opt/data/skills` in the gateway and `/workspace/skills` in the sandbox.
+**Volume persistence does not automatically commit or push files.** Publishing
+is deliberately a host-side action so Git write credentials do not need to enter
+the sandbox.
+
+After building and testing a skill, export only that skill into your repository
+checkout. Replace `my-skill` with its directory name:
+
+```sh
+mkdir -p skills
+docker compose cp hermes-sandbox:/workspace/skills/my-skill ./skills/
+git status --short -- skills/my-skill
+```
+
+Review the exported instructions, scripts, fixtures, and any new files for
+unexpected changes or secrets. `git diff` does not show the contents of untracked
+files, so inspect those separately. Then publish the reviewed files:
+
+```sh
+git add -- skills/my-skill
+git diff --cached --check
+git diff --cached -- skills/my-skill
+git commit -m "Add tested my-skill Hermes skill"
+git push
+```
+
+Use your own clone/fork or a separate skills repository that you can push to.
+Exporting is a snapshot, not a live bind mount or an automatic Git sync; later
+edits must be exported and reviewed again. Do not commit `.env`, tokens, private
+keys, sensitive test data, or the entire Hermes data/workspace volumes.
+
 ## Deploy in two steps
 
 Prerequisites: a Linux Docker host (or Docker Desktop), Docker Compose v2, and an
