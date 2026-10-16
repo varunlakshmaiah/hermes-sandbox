@@ -6,6 +6,11 @@ Two containers, automatic SSH keys, persistent named volumes, and no Docker sock
 The gateway runs [NousResearch's Hermes Agent](https://github.com/NousResearch/hermes-agent);
 terminal commands run in a separate, resource-limited Python sandbox.
 
+**Start here:** [Deploy](#deploy-in-two-steps) ·
+[Use your skills repository](#use-your-skills-repository-public-or-private) ·
+[Save changes](#save-reviewed-skills-to-github) ·
+[Security](#architecture--security)
+
 ## Project goal
 
 **To securely build and test Hermes skills and save them to the Git repository.**
@@ -26,40 +31,6 @@ that arbitrary code or prompt-injected tasks are safe.
 | API-driven automation | Connect an OpenAI-compatible client to the authenticated API to run repeatable development and testing tasks. |
 | Discord-assisted development | Use an access-controlled bot to request skill changes and test runs while retaining a host-side review and publishing step. |
 | Self-hosted skill libraries | Keep skills across container restarts and export reviewed versions into Git for change history, collaboration, and rollback. |
-
-### Save reviewed skills to Git
-
-Skills persist in the `hermes_skills` named volume, visible at
-`/opt/data/skills` in the gateway and `/workspace/skills` in the sandbox.
-**Volume persistence does not automatically commit or push files.** Publishing
-is deliberately a host-side action so Git write credentials do not need to enter
-the sandbox.
-
-After building and testing a skill, export only that skill into your repository
-checkout. Replace `my-skill` with its directory name:
-
-```sh
-mkdir -p skills
-docker compose cp hermes-sandbox:/workspace/skills/my-skill ./skills/
-git status --short -- skills/my-skill
-```
-
-Review the exported instructions, scripts, fixtures, and any new files for
-unexpected changes or secrets. `git diff` does not show the contents of untracked
-files, so inspect those separately. Then publish the reviewed files:
-
-```sh
-git add -- skills/my-skill
-git diff --cached --check
-git diff --cached -- skills/my-skill
-git commit -m "Add tested my-skill Hermes skill"
-git push
-```
-
-Use your own clone/fork or a separate skills repository that you can push to.
-Exporting is a snapshot, not a live bind mount or an automatic Git sync; later
-edits must be exported and reviewed again. Do not commit `.env`, tokens, private
-keys, sensitive test data, or the entire Hermes data/workspace volumes.
 
 ## Deploy in two steps
 
@@ -135,6 +106,139 @@ built and pushed to your own registry first. **Swarm stacks are not supported**:
 they do not build these Dockerfiles and do not honor Compose health dependencies.
 PaaS environment/file handling varies; this is not a claim of zero-click
 compatibility with every platform version.
+
+## Use your skills repository (public or private)
+
+**Available today:** download a reviewed copy, test it in the sandbox, and save
+approved changes from your computer. **No GitHub token is needed inside Hermes.**
+Automatic repository syncing and agent-driven pushes are not included in this
+release; adding a repository URL or token to `.env` will not enable them.
+
+A *repository* is your project's folder on GitHub. A *skill* is usually a folder
+containing `SKILL.md` instructions plus optional scripts and supporting files.
+
+### 1. Get a trusted copy
+
+| Your repository | What to do |
+| --- | --- |
+| Public | Open it on GitHub, select a reviewed release or commit, then choose **Code → Download ZIP**. |
+| Private | Sign in to GitHub with an account that can access it, then download the ZIP the same way. Keep private files private. |
+
+Unzip the download and rename its folder to `skill-source`. Record the source
+repository and commit so you can reproduce or undo changes. Do not include
+tokens, `.env` files, private keys, or sensitive sample data.
+
+### 2. Copy it into a development workspace
+
+Run these commands **on the Docker host**, in the `hermes-sandbox` project folder
+where `docker-compose.yml` lives. Place `skill-source` beside that file first.
+If Docker runs on another machine, upload the folder there using your normal
+secure file-transfer method. The deployment must already be running.
+
+```sh
+docker compose cp ./skill-source hermes-sandbox:/tmp/skill-source
+docker compose exec hermes-sandbox mkdir -p /workspace/repos
+docker compose exec hermes-sandbox cp -R /tmp/skill-source /workspace/repos/my-skills
+```
+
+This creates a writable copy owned by the sandbox user. Use a fresh destination
+name instead of `my-skills` for each later import; do not copy over unfinished
+work. The temporary upload must fit in the sandbox's 256 MiB `/tmp` space.
+After a successful import, remove that temporary copy:
+
+```sh
+docker compose exec hermes-sandbox rm -r /tmp/skill-source
+```
+
+`/workspace/repos/my-skills` is the **development copy** and survives container
+restarts. It is not automatically installed as an active Hermes skill.
+
+### 3. Ask Hermes to inspect and test
+
+Use your configured API client or Discord bot. For example:
+
+> Inspect `/workspace/repos/my-skills` in the SSH sandbox. Explain its skills
+> and scripts before running anything. Work only in that development folder.
+> Do not request credentials, change active skills, or publish changes.
+
+Review the explanation, then approve specific tests or changes. Importing a
+repository does not make its instructions trustworthy. Testing may need extra
+Python dependencies in a workspace virtual environment; Git is not installed
+in the current sandbox image.
+
+To **use** an approved skill, rather than just develop it, copy only its reviewed
+folder into the active library. Replace the example source path with the folder
+that contains its `SKILL.md`; the destination name must not already exist:
+
+```sh
+docker compose exec hermes-sandbox test ! -e /workspace/skills/my-skill
+docker compose exec hermes-sandbox cp -R /workspace/repos/my-skills/skills/my-skill /workspace/skills/my-skill
+docker compose restart hermes-gateway
+```
+
+Proceed with the copy only if the first command succeeds. Some repositories
+store skills at their root instead of under `skills/`; adjust the source path.
+Review all files and reject symbolic links (shortcuts to other paths) before
+copying. Restarting the gateway interrupts active conversations.
+
+**Current limitation:** `/workspace/skills` is shared and writable by the sandbox.
+These steps are a human review workflow, not an enforced approval barrier:
+agent-executed code can still change active skills. Use a separate VM for
+genuinely hostile code.
+
+### Save reviewed skills to GitHub
+
+Export only the skill you want to keep, using a new local folder:
+
+```sh
+mkdir skills-export
+docker compose cp hermes-sandbox:/workspace/repos/my-skills/skills/my-skill ./skills-export/
+```
+
+Use the development path above for changes made there, or
+`hermes-sandbox:/workspace/skills/my-skill` for changes made to an active skill.
+Open the exported files and check for secrets and unexpected instructions.
+Then use **GitHub Desktop** to put them in your skills repository, review the
+changes, commit (save a version), and push (upload). Prefer a new branch and a
+pull request (a change proposal) rather than updating the main version directly.
+Keep private skills in a private repository.
+
+<details>
+<summary>Command-line alternative for Git users</summary>
+
+Copy the reviewed export into your separate skills repository checkout first.
+From that checkout, adapting the path and branch name:
+
+```sh
+git switch -c skills/my-skill-update
+git add -- skills/my-skill
+git diff --cached --check
+git diff --cached -- skills/my-skill
+git commit -m "Update tested my-skill Hermes skill"
+git push -u origin skills/my-skill-update
+```
+
+Open a pull request on GitHub. Only stage reviewed skill files, never the entire
+Hermes data/workspace volumes.
+
+</details>
+
+Exporting is a snapshot, not automatic sync. Repeat export and review for later
+changes. Persistent Docker storage is not a Git backup.
+
+### Planned automatic integration (not available yet)
+
+| Stage | Intended behavior |
+| --- | --- |
+| Read-only import | List public/private sources and pinned revisions; fetch into separate development folders without automatically running or activating skills. |
+| Private access | Use sandbox-only, read-only deploy keys per repository, or narrowly scoped read-only tokens. No credentials in repository URLs or images. |
+| Reviewed activation | Provide explicit promotion and rollback; separate the active library from sandbox writes while preserving Hermes SSH file-sync behavior. |
+| Optional publishing | Prefer host-side publishing. For autonomous work, restrict a separate write credential to a dedicated fork and propose changes through reviewed PRs. |
+
+Automatic integration needs implementation and testing before use. Any credential
+given to sandbox code can be read by that code; a read-only secret mount prevents
+editing the secret file, not stealing its contents. Do not add your private
+repository token to the current deployment expecting secure automatic access.
 
 ## Architecture & Security
 
