@@ -1,0 +1,22 @@
+# Keeps pinned base images, actions and tools current. CI smoke-tests every update
+# before merged changes publish new images.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /tests
+    schedule:
+      interval: weekly
+    groups:
+      tools:
+        patterns: ["*"]

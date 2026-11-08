@@ -1,0 +1,292 @@
+#!/bin/sh
+# hermes — one-command management for the hermes-sandbox deployment.
+# Requires only Docker with Compose v2.24+. Run `./hermes help` for usage.
+set -eu
+
+DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+ENV_FILE="$DIR/.env"
+GATEWAY=hermes-gateway
+SANDBOX=hermes-sandbox
+GATEWAY_PY=/opt/hermes/.venv/bin/python
+REPOS=/workspace/repos
+
+usage() {
+	cat <<'EOF'
+Usage: ./hermes <command> [arguments]
+
+Deploy
+  setup                     Create .env, ask for your OpenAI key, deploy, print connection details
+  up                        Start or apply .env changes
+  down                      Stop (keeps all data)
+  restart                   Restart the gateway (reloads active skills)
+  update                    Back up, then pull the latest tested images and redeploy
+  status                    Show service health
+  logs [service...]         Show recent logs
+  key                       Print the Hermes API key for your client
+
+Skills
+  import <dir> [name]       Copy a local folder into the sandbox at /workspace/repos/<name>
+  activate <path> [name] [--replace]
+                            Install /workspace/repos/<path> (must contain SKILL.md) as an active skill
+  export <skill|path> [dir] Copy an active skill (or /workspace/repos/<path>) to ./skills-export
+
+Data
+  backup [dir]              Archive all data to ./backups (briefly stops the services)
+  restore <archive-prefix> [--yes]
+                            Replace all data with a backup, e.g. backups/hermes-20260101-120000
+EOF
+}
+
+die() {
+	printf 'error: %s\n' "$*" >&2
+	exit 1
+}
+
+compose() {
+	docker compose --project-directory "$DIR" -f "$DIR/docker-compose.yml" "$@"
+}
+
+require_docker() {
+	command -v docker >/dev/null 2>&1 || die "Docker is not installed: https://docs.docker.com/get-docker/"
+	version=$(docker compose version --short 2>/dev/null) || die "Docker Compose v2 is required"
+	version=${version#v}
+	major=${version%%.*}
+	minor=${version#*.}
+	minor=${minor%%.*}
+	case "$major.$minor" in *[!0-9.]* | .* | *.) die "Unrecognised Docker Compose version: $version" ;; esac
+	if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }; then
+		die "Docker Compose 2.24 or newer is required (found $version)"
+	fi
+	docker info >/dev/null 2>&1 || die "Docker is not running, or this user cannot access it"
+}
+
+valid_name() {
+	case "$1" in
+	'' | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) die "Invalid name '$1': use letters, digits, '.', '_' or '-'" ;;
+	esac
+}
+
+valid_path() {
+	case "/$1/" in
+	*/../* | */./* | //* | *//*) die "Invalid path '$1': use a relative path inside $REPOS" ;;
+	esac
+	case "$1" in *[!A-Za-z0-9._/-]*) die "Invalid path '$1': unsupported characters" ;; esac
+}
+
+env_value() {
+	[ -f "$ENV_FILE" ] || return 0
+	sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed "s/^['\"]//; s/['\"]\$//"
+}
+
+set_env() {
+	tmp=$(mktemp "$DIR/.env.XXXXXX")
+	K=$1 V=$2 awk 'BEGIN { line = ENVIRON["K"] "='\''" ENVIRON["V"] "'\''" }
+		index($0, ENVIRON["K"] "=") == 1 { if (!done) print line; done = 1; next }
+		{ print }
+		END { if (!done) print line }' "$ENV_FILE" >"$tmp"
+	chmod 600 "$tmp"
+	mv "$tmp" "$ENV_FILE"
+}
+
+require_running() {
+	[ "$(compose ps --status running -q "$GATEWAY" "$SANDBOX" | wc -l)" -eq 2 ] ||
+		die "Hermes is not running; start it with ./hermes up"
+}
+
+api_key() {
+	compose exec -T --user hermes "$GATEWAY" cat /opt/data/.deployment/api-key
+}
+
+cmd_setup() {
+	if [ ! -f "$ENV_FILE" ]; then
+		(umask 077 && cp "$DIR/.env.example" "$ENV_FILE")
+		echo "Created .env"
+	fi
+	key=$(env_value OPENAI_API_KEY)
+	if [ -z "$key" ] || [ "$key" = your_openai_api_key_here ]; then
+		key=${OPENAI_API_KEY:-}
+		if [ -z "$key" ]; then
+			[ -t 0 ] || die "Set OPENAI_API_KEY in .env or the environment, then re-run"
+			printf 'OpenAI API key (input hidden): '
+			trap 'stty echo' EXIT INT TERM
+			stty -echo
+			IFS= read -r key || true
+			stty echo
+			trap - EXIT INT TERM
+			printf '\n'
+		fi
+		case "$key" in '' | *"'"* | *[[:space:]]*) die "That does not look like an API key" ;; esac
+		set_env OPENAI_API_KEY "$key"
+	fi
+	chmod 600 "$ENV_FILE"
+	cmd_up
+	port=$(env_value HERMES_API_PORT)
+	cat <<EOF
+
+Hermes is ready. Configure any OpenAI-compatible client with:
+  Base URL: http://127.0.0.1:${port:-8000}/v1
+  Model:    hermes-agent
+  API key:  $(api_key)
+Keep the API key private. Show it again with: ./hermes key
+EOF
+}
+
+cmd_up() {
+	if ! compose up -d --wait --wait-timeout 600; then
+		compose ps
+		echo "Startup failed. Recent logs:" >&2
+		compose logs --tail=60 >&2
+		exit 1
+	fi
+	compose ps
+}
+
+cmd_update() {
+	cmd_backup
+	if ! compose pull --quiet; then
+		echo "Prebuilt images unavailable; building from source instead."
+		compose build --pull
+	fi
+	cmd_up
+}
+
+cmd_import() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: ./hermes import <dir> [name]"
+	[ -d "$1" ] || die "Not a directory: $1"
+	name=${2:-$(basename -- "$(CDPATH='' cd -- "$1" && pwd)")}
+	valid_name "$name"
+	compose exec -T "$SANDBOX" test ! -e "$REPOS/$name" ||
+		die "$REPOS/$name already exists; choose another name: ./hermes import $1 <name>"
+	# shellcheck disable=SC2016 # $1 expands inside the sandbox shell
+	if ! COPYFILE_DISABLE=1 tar -C "$1" --exclude=.git --exclude=.env --exclude='.env.*' -cf - . |
+		compose exec -T "$SANDBOX" sh -c 'mkdir -p "$1" && tar -xf - --no-same-owner --warning=no-unknown-keyword -C "$1"' sh "$REPOS/$name"; then
+		compose exec -T "$SANDBOX" rm -rf -- "$REPOS/$name"
+		die "Import failed"
+	fi
+	echo "Imported into $REPOS/$name (.git and .env files skipped)"
+}
+
+cmd_activate() {
+	replace=
+	set -- "$@" --end
+	path='' name=''
+	while [ "$1" != --end ]; do
+		case "$1" in
+		--replace) replace=--replace ;;
+		-*) die "Unknown option: $1" ;;
+		*) if [ -z "$path" ]; then path=$1; elif [ -z "$name" ]; then name=$1; else die "Too many arguments"; fi ;;
+		esac
+		shift
+	done
+	[ -n "$path" ] || die "usage: ./hermes activate <path-in-repos> [name] [--replace]"
+	path=${path%/}
+	valid_path "$path"
+	name=${name:-$(basename -- "$path")}
+	valid_name "$name"
+	compose exec -T "$SANDBOX" test -f "$REPOS/$path/SKILL.md" || die "$REPOS/$path/SKILL.md not found"
+	# The gateway validates the untrusted archive: regular files only, no links, bounded size.
+	compose exec -T "$SANDBOX" tar -C "$REPOS/$path" -cf - . |
+		compose exec -T --user hermes "$GATEWAY" "$GATEWAY_PY" /opt/deployment/gateway.py install-skill "$name" ${replace:+--replace}
+	echo "Run ./hermes restart if Hermes does not list the skill in new conversations."
+}
+
+cmd_export() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: ./hermes export <skill|path-in-repos> [dir]"
+	source=${1%/}
+	dest=${2:-./skills-export}
+	case "$source" in
+	*/*) valid_path "$source" && from="$SANDBOX:$REPOS/$source" ;;
+	*) valid_name "$source" && from="$GATEWAY:/opt/data/skills/$source" ;;
+	esac
+	target="$dest/$(basename -- "$source")"
+	[ ! -e "$target" ] || die "$target already exists; choose another destination"
+	mkdir -p "$dest"
+	compose cp "$from" "$target"
+	echo "Exported to $target — review it, then commit it to your skills repository."
+}
+
+archive() { # archive <container> <host-dir> <file> <path-in-container>
+	docker run --rm --network none --user 0 --entrypoint sh --volumes-from "$1:ro" \
+		-v "$2:/backup" "$(docker inspect --format '{{.Image}}' "$1")" \
+		-c 'tar --numeric-owner -czf "/backup/$1" -C / "$2" && { chown "$3" "/backup/$1" 2>/dev/null || true; }' \
+		sh "$3" "$4" "$(id -u):$(id -g)"
+}
+
+containers() {
+	gateway_id=$(compose ps -aq "$GATEWAY")
+	sandbox_id=$(compose ps -aq "$SANDBOX")
+	[ -n "$gateway_id" ] && [ -n "$sandbox_id" ] || die "No deployment found; run ./hermes setup first"
+}
+
+cmd_backup() {
+	containers
+	dest=${1:-$DIR/backups}
+	mkdir -p "$dest"
+	dest=$(CDPATH='' cd -- "$dest" && pwd)
+	prefix="hermes-$(date +%Y%m%d-%H%M%S)"
+	compose stop
+	trap 'compose start >/dev/null 2>&1 || true' EXIT
+	archive "$gateway_id" "$dest" "$prefix-gateway.tar.gz" opt/data
+	archive "$sandbox_id" "$dest" "$prefix-sandbox.tar.gz" workspace
+	trap - EXIT
+	cmd_up >/dev/null
+	echo "Backup written to $dest/$prefix-{gateway,sandbox}.tar.gz"
+}
+
+restore_one() { # restore_one <container> <archive> <path-in-container>
+	docker run --rm --network none --user 0 --entrypoint sh --volumes-from "$1" \
+		-v "$(dirname -- "$2"):/backup:ro" "$(docker inspect --format '{{.Image}}' "$1")" \
+		-c 'find "/$2" -mindepth 1 -maxdepth 1 ! -name skills -exec rm -rf {} + &&
+			if [ -d "/$2/skills" ]; then find "/$2/skills" -mindepth 1 -maxdepth 1 -exec rm -rf {} +; fi &&
+			tar --numeric-owner -xzpf "/backup/$1" -C /' \
+		sh "$(basename -- "$2")" "$3"
+}
+
+cmd_restore() {
+	[ $# -ge 1 ] || die "usage: ./hermes restore <archive-prefix> [--yes]"
+	prefix=${1%-gateway.tar.gz}
+	prefix=${prefix%-sandbox.tar.gz}
+	for part in gateway sandbox; do
+		[ -f "$prefix-$part.tar.gz" ] || die "Missing $prefix-$part.tar.gz"
+	done
+	if [ "${2:-}" != --yes ]; then
+		[ -t 0 ] || die "Pass --yes to confirm replacing all data"
+		printf 'Replace ALL current Hermes data with %s? [y/N] ' "$prefix"
+		read -r answer
+		case "$answer" in y | Y | yes) ;; *) die "Cancelled" ;; esac
+	fi
+	compose create
+	containers
+	compose stop
+	restore_one "$gateway_id" "$(CDPATH='' cd -- "$(dirname -- "$prefix")" && pwd)/$(basename -- "$prefix")-gateway.tar.gz" opt/data
+	restore_one "$sandbox_id" "$(CDPATH='' cd -- "$(dirname -- "$prefix")" && pwd)/$(basename -- "$prefix")-sandbox.tar.gz" workspace
+	cmd_up
+	echo "Restored from $prefix"
+}
+
+main() {
+	command=${1:-help}
+	[ $# -eq 0 ] || shift
+	case "$command" in
+	help | -h | --help) usage && return ;;
+	esac
+	require_docker
+	case "$command" in
+	setup) cmd_setup ;;
+	up | start) cmd_up ;;
+	down | stop) compose down ;;
+	restart) compose restart "$GATEWAY" && cmd_up >/dev/null ;;
+	update) cmd_update ;;
+	status | ps) compose ps ;;
+	logs) compose logs --tail=100 "$@" ;;
+	key) require_running && api_key ;;
+	import) require_running && cmd_import "$@" ;;
+	activate) require_running && cmd_activate "$@" ;;
+	export) require_running && cmd_export "$@" ;;
+	backup) cmd_backup "$@" ;;
+	restore) cmd_restore "$@" ;;
+	*) usage >&2 && exit 2 ;;
+	esac
+}
+
+main "$@"
