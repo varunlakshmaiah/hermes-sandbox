@@ -7,13 +7,15 @@ LABEL org.opencontainers.image.source="https://github.com/varunlakshmaiah/hermes
 # Upstream's s6 init runs as root and drops to the hermes user itself.
 # hadolint ignore=DL3002,DL3066
 USER 0
-# Our hook must run after upstream's volume permission fix (015) and before services start.
+# Hooks: 00 fixes skills-volume ownership before upstream setup (01); 019 configures
+# Hermes after upstream's permission fix (015) and before services start.
 RUN command -v ssh && command -v ssh-keygen && \
     /opt/hermes/.venv/bin/python -c "import hermes_yaml, dotenv" && \
-    test -x /etc/cont-init.d/015-supervise-perms && \
+    test -x /etc/cont-init.d/01-hermes-setup && test -x /etc/cont-init.d/015-supervise-perms && \
     install -d -m 0755 /opt/deployment && \
     install -d -o 10000 -g 10000 -m 0755 /run/hermes-public
 COPY --chmod=0644 docker/gateway.py /opt/deployment/gateway.py
+COPY --chmod=0755 docker/skills-owner.sh /etc/cont-init.d/00-hermes-sandbox-skills
 COPY --chmod=0755 docker/prepare-gateway.sh /etc/cont-init.d/019-hermes-sandbox
 
 HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
