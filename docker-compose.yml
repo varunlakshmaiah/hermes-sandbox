@@ -12,6 +12,8 @@ services:
         required: false
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       HERMES_MODEL: ${HERMES_MODEL:-}
       API_SERVER_KEY: ${API_SERVER_KEY:-}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
@@ -22,6 +24,9 @@ services:
       HERMES_DASHBOARD: "false"
     ports:
       - "127.0.0.1:${HERMES_API_PORT:-8000}:8000"
+    # Lets LLM_BASE_URL reach model servers on the host (Ollama, LM Studio) on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - hermes_data:/opt/data
       - hermes_skills:/opt/data/skills

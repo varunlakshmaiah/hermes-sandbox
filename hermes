@@ -15,7 +15,7 @@ usage() {
 Usage: ./hermes <command> [arguments]
 
 Deploy
-  setup                     Create .env, ask for your OpenAI key, deploy, print connection details
+  setup [--reconfigure]     Create .env, ask for your model provider, deploy, print connection details
   up                        Start or apply .env changes
   down                      Stop (keeps all data)
   restart                   Restart the gateway (reloads active skills)
@@ -97,27 +97,67 @@ api_key() {
 	compose exec -T --user hermes "$GATEWAY" cat /opt/data/.deployment/api-key
 }
 
+read_secret() { # read_secret <prompt>; sets REPLY without echoing it
+	trap 'stty echo' EXIT
+	trap 'stty echo; printf "\n"; exit 130' INT TERM
+	stty -echo
+	printf '%s' "$1"
+	IFS= read -r REPLY || REPLY=
+	stty echo
+	trap - EXIT INT TERM
+	printf '\n'
+}
+
+provider_configured() {
+	key=$(env_value OPENAI_API_KEY)
+	[ -n "$(env_value LLM_BASE_URL)" ] || { [ -n "$key" ] && [ "$key" != your_openai_api_key_here ]; }
+}
+
+save_settings() { # save_settings NAME=value ...; validates everything before writing
+	for pair in "$@"; do
+		case "${pair#*=}" in *"'"* | *[[:space:]]*) die "${pair%%=*} must not contain spaces or quotes" ;; esac
+	done
+	for pair in "$@"; do set_env "${pair%%=*}" "${pair#*=}"; done
+}
+
+ask_provider() {
+	[ -t 0 ] || die "Set OPENAI_API_KEY, or LLM_BASE_URL and HERMES_MODEL, in .env or the environment, then re-run"
+	echo "Choose a model provider: press Enter for OpenAI, or paste the base URL of any"
+	echo "OpenAI-compatible API, e.g. https://openrouter.ai/api/v1 or, for Ollama on this"
+	echo "computer, http://host.docker.internal:11434/v1"
+	printf 'Base URL [OpenAI]: '
+	IFS= read -r url || url=
+	if [ -z "$url" ]; then
+		read_secret 'OpenAI API key (input hidden): '
+		[ -n "$REPLY" ] || die "No API key entered"
+		save_settings "OPENAI_API_KEY=$REPLY" LLM_BASE_URL=
+		return
+	fi
+	case "$url" in http://?* | https://?*) ;; *) die "The base URL must start with http:// or https://" ;; esac
+	read_secret 'API key (input hidden; press Enter if none): '
+	key=$REPLY
+	printf 'Model name (as listed by the provider): '
+	IFS= read -r model || model=
+	[ -n "$model" ] || die "A model name is required"
+	save_settings "LLM_BASE_URL=$url" "LLM_API_KEY=$key" "HERMES_MODEL=$model"
+}
+
 cmd_setup() {
 	if [ ! -f "$ENV_FILE" ]; then
 		(umask 077 && cp "$DIR/.env.example" "$ENV_FILE")
 		echo "Created .env"
 	fi
-	key=$(env_value OPENAI_API_KEY)
-	if [ -z "$key" ] || [ "$key" = your_openai_api_key_here ]; then
-		key=${OPENAI_API_KEY:-}
-		if [ -z "$key" ]; then
-			[ -t 0 ] || die "Set OPENAI_API_KEY in .env or the environment, then re-run"
-			printf 'OpenAI API key (input hidden): '
-			trap 'stty echo' EXIT
-			trap 'stty echo; printf "\n"; exit 130' INT TERM
-			stty -echo
-			IFS= read -r key || true
-			stty echo
-			trap - EXIT INT TERM
-			printf '\n'
+	if [ "${1:-}" = --reconfigure ] || ! provider_configured; then
+		if [ "${1:-}" != --reconfigure ] && [ -n "${OPENAI_API_KEY:-}${LLM_BASE_URL:-}" ]; then
+			set --
+			for name in OPENAI_API_KEY LLM_BASE_URL LLM_API_KEY HERMES_MODEL; do
+				value=$(printenv "$name" || true)
+				[ -z "$value" ] || set -- "$@" "$name=$value"
+			done
+			save_settings "$@"
+		else
+			ask_provider
 		fi
-		case "$key" in '' | *"'"* | *[[:space:]]*) die "That does not look like an API key" ;; esac
-		set_env OPENAI_API_KEY "$key"
 	fi
 	chmod 600 "$ENV_FILE"
 	cmd_up
@@ -273,7 +313,7 @@ main() {
 	esac
 	require_docker
 	case "$command" in
-	setup) cmd_setup ;;
+	setup) cmd_setup "$@" ;;
 	up | start) cmd_up ;;
 	down | stop) compose down ;;
 	restart) compose restart "$GATEWAY" && cmd_up >/dev/null ;;

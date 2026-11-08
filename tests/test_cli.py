@@ -78,7 +78,7 @@ class CliTests(unittest.TestCase):
         lines = env_file.read_text().splitlines()
         self.assertIn("OPENAI_API_KEY='sk-synthetic'", lines)
         self.assertEqual(sum(line.startswith("OPENAI_API_KEY=") for line in lines), 1)
-        self.assertIn("HERMES_MODEL=gpt-4.1-mini", lines)
+        self.assertIn("HERMES_API_PORT=8000", lines)
         self.assertIn("synthetic-hermes-api-key", result.stdout)
         self.assertIn("http://127.0.0.1:8000/v1", result.stdout)
         compose = f"compose --project-directory {self.project} -f {self.project}/docker-compose.yml"
@@ -87,10 +87,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("setup").returncode, 0)
         self.assertIn("OPENAI_API_KEY='sk-synthetic'", env_file.read_text())
 
+    def test_setup_accepts_openai_compatible_provider_from_environment(self):
+        result = self.run_cli(
+            "setup",
+            LLM_BASE_URL="https://api.groq.com/openai/v1",
+            LLM_API_KEY="gsk-synthetic",
+            HERMES_MODEL="m-1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.project / ".env").read_text().splitlines()
+        for line in (
+            "LLM_BASE_URL='https://api.groq.com/openai/v1'",
+            "LLM_API_KEY='gsk-synthetic'",
+            "HERMES_MODEL='m-1'",
+        ):
+            self.assertIn(line, lines)
+        self.assertIn("OPENAI_API_KEY=your_openai_api_key_here", lines)
+
+    def test_setup_rejects_unsafe_values_before_writing(self):
+        result = self.run_cli("setup", LLM_BASE_URL="https://x/v1", HERMES_MODEL="bad model")
+        self.assertIn("HERMES_MODEL must not contain spaces", result.stderr)
+        self.assertNotIn("LLM_BASE_URL='", (self.project / ".env").read_text())
+
     def test_setup_without_key_or_terminal_fails_clearly(self):
         result = self.run_cli("setup")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Set OPENAI_API_KEY", result.stderr)
+        self.assertIn("Set OPENAI_API_KEY, or LLM_BASE_URL", result.stderr)
         self.assertFalse(any(" up " in call for call in self.calls()))
 
     def test_import_validates_and_streams_into_sandbox(self):

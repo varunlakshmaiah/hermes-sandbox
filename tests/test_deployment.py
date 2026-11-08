@@ -143,6 +143,70 @@ class BootstrapTests(GatewayTestCase):
         self.assertEqual(values["OPENAI_API_KEY"], os.environ["OPENAI_API_KEY"])
         self.assertEqual(values["API_SERVER_KEY"], os.environ["API_SERVER_KEY"])
 
+    def configured(self):
+        config = yaml.safe_load((self.home / "config.yaml").read_text())
+        return config["model"], dotenv_values(self.home / ".env")
+
+    def test_openai_compatible_provider(self):
+        os.environ.pop("OPENAI_API_KEY")
+        os.environ.update(
+            LLM_BASE_URL="https://openrouter.ai/api/v1/",
+            LLM_API_KEY="sk-or-synthetic",
+            HERMES_MODEL="org/model",
+        )
+        gateway.configure()
+        model, values = self.configured()
+        self.assertEqual(
+            model,
+            {
+                "provider": "custom",
+                "base_url": "https://openrouter.ai/api/v1",
+                "default": "org/model",
+                "key_env": "LLM_API_KEY",
+            },
+        )
+        self.assertEqual(values["LLM_API_KEY"], "sk-or-synthetic")
+        self.assertEqual(values["OPENAI_API_KEY"], "")
+        self.assertNotIn("sk-or-synthetic", (self.home / "config.yaml").read_text())
+
+    def test_keyless_local_provider_and_switching_back_to_openai(self):
+        os.environ.update(LLM_BASE_URL="http://host.docker.internal:11434/v1", HERMES_MODEL="llama3.2")
+        (self.home / "config.yaml").write_text("model:\n  api_key: stale\n  api_mode: codex_responses\n")
+        gateway.configure()
+        model, _ = self.configured()
+        self.assertEqual(
+            model,
+            {"provider": "custom", "base_url": "http://host.docker.internal:11434/v1", "default": "llama3.2"},
+        )
+        del os.environ["LLM_BASE_URL"], os.environ["HERMES_MODEL"]
+        gateway.configure()
+        model, values = self.configured()
+        self.assertEqual(model, {"provider": "openai", "default": "gpt-4.1-mini"})
+        self.assertEqual(values["OPENAI_API_KEY"], "synthetic-test-only")
+
+    def test_llm_api_key_alone_is_an_openai_key(self):
+        os.environ.pop("OPENAI_API_KEY")
+        os.environ["LLM_API_KEY"] = "sk-synthetic"
+        gateway.configure()
+        model, values = self.configured()
+        self.assertEqual(model["provider"], "openai")
+        self.assertEqual(values["OPENAI_API_KEY"], "sk-synthetic")
+
+    def test_rejects_invalid_provider_settings(self):
+        cases = {
+            "must be an http": {"LLM_BASE_URL": "openrouter.ai/api/v1", "HERMES_MODEL": "m"},
+            "must be an http(s) URL": {"LLM_BASE_URL": "https://host/v1?x=1", "HERMES_MODEL": "m"},
+            "HERMES_MODEL": {"LLM_BASE_URL": "https://openrouter.ai/api/v1"},
+        }
+        for message, values in cases.items():
+            with (
+                self.subTest(message),
+                patch.dict(os.environ, values),
+                self.assertRaises(ValueError) as error,
+            ):
+                gateway.configure()
+            self.assertIn(message, str(error.exception))
+
     def test_preserves_real_discord_settings(self):
         os.environ["DISCORD_BOT_TOKEN"] = "synthetic-discord-token"
         os.environ["DISCORD_ALLOWED_USERS"] = "123,456"
@@ -361,6 +425,8 @@ class ComposeTests(unittest.TestCase):
         environment = service["environment"]
         self.assertEqual(environment["OPENAI_API_KEY"], "${OPENAI_API_KEY:-}")
         self.assertEqual(environment["HERMES_DASHBOARD"], "false")
+        self.assertEqual(environment["LLM_BASE_URL"], "${LLM_BASE_URL:-}")
+        self.assertEqual(service["extra_hosts"], ["host.docker.internal:host-gateway"])
         self.assertFalse(any(name.startswith("TERMINAL_") for name in environment))
         self.assertEqual(service["depends_on"]["hermes-sandbox"]["condition"], "service_healthy")
 

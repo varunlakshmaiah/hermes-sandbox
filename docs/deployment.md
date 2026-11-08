@@ -6,7 +6,8 @@
 
 - Docker Engine or Docker Desktop with **Docker Compose 2.24 or newer**
   (`docker compose version`).
-- An OpenAI API key with access to your chosen model. Provider usage may incur charges.
+- An API key for OpenAI or another OpenAI-compatible provider (none for local model
+  servers). Provider usage may incur charges.
 - Disk space and memory for the upstream Hermes image, plus up to 2 GiB of RAM for the
   sandbox. Both containers run on the same Docker host.
 - `./hermes` is a POSIX shell script: use Linux, macOS, or Windows with WSL.
@@ -14,12 +15,15 @@
 ## Configuration reference
 
 `./hermes setup` creates `.env` from [`.env.example`](../.env.example) and asks for your
-key. Every setting can instead come from your shell or platform environment variables.
+provider and key (`./hermes setup --reconfigure` asks again). Every setting can instead
+come from your shell or platform environment variables.
 
 | Setting | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | **Required.** Your OpenAI provider credential. |
-| `HERMES_MODEL` | OpenAI model available to your account; default `gpt-4.1-mini`. |
+| `OPENAI_API_KEY` | Your OpenAI credential, when using OpenAI (the default provider). |
+| `LLM_BASE_URL` | Base URL of any OpenAI-compatible API, e.g. `https://openrouter.ai/api/v1`. Empty means OpenAI. |
+| `LLM_API_KEY` | Key for `LLM_BASE_URL`; leave empty for keyless local servers. |
+| `HERMES_MODEL` | Model name. Default `gpt-4.1-mini` for OpenAI; required with `LLM_BASE_URL`. |
 | `API_SERVER_KEY` | Your client's Hermes API password. Leave empty to generate one, or supply a unique random value of at least 32 characters. |
 | `DISCORD_BOT_TOKEN` | Optional Discord bot token. The example placeholder is ignored. |
 | `DISCORD_ALLOWED_USERS` | Comma-separated Discord user IDs allowed to use the bot. |
@@ -29,6 +33,13 @@ key. Every setting can instead come from your shell or platform environment vari
 Apply changes with `./hermes up`. A plain `docker compose restart` does not reload
 environment changes. Any other variable in `.env` (for example a different provider's
 key) is passed to Hermes unchanged.
+
+With `LLM_BASE_URL` set, startup configures Hermes' `custom` provider (`model.base_url`,
+with `model.key_env: LLM_API_KEY`), so the key is sent only to that endpoint. Model
+servers on the Docker host are reachable as `host.docker.internal` (mapped on Linux too).
+On Linux, such a server must listen on an interface containers can reach, not only
+`127.0.0.1`. Providers that need OAuth or non-OpenAI protocols are not configured by this
+deployment.
 
 Startup refuses `DISCORD_ALLOW_ALL_USERS`, `GATEWAY_ALLOW_ALL_USERS` and
 `gateway.allow_all_users`: an agent with shell access must not accept commands from

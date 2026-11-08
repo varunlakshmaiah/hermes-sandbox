@@ -32,8 +32,9 @@ Docker containers: a **gateway** that holds your keys and runs the agent, and a
 
 ## Quick start
 
-You need [Docker](https://docs.docker.com/get-docker/) (Compose 2.24+) and an OpenAI
-API key. On Windows, use WSL.
+You need [Docker](https://docs.docker.com/get-docker/) (Compose 2.24+) and an API key
+for OpenAI or any [OpenAI-compatible provider](#use-another-model-provider). On Windows,
+use WSL.
 
 ```sh
 git clone https://github.com/varunlakshmaiah/hermes-sandbox.git
@@ -41,14 +42,14 @@ cd hermes-sandbox
 ./hermes setup
 ```
 
-`setup` asks for your OpenAI key (stored privately in `.env`), downloads the tested
+`setup` asks for your model provider and key (stored privately in `.env`), downloads the tested
 images, starts both containers, waits until they are healthy, and prints everything your
 client needs. That's it — storage, SSH keys and the API key are created automatically,
 and the services restart on their own after a reboot.
 
 > [!TIP]
 > On Dokploy, Portainer or similar, deploy `docker-compose.yml` and set
-> `OPENAI_API_KEY` as an environment variable. No `.env` file or build is needed.
+> `OPENAI_API_KEY` (or the provider settings below) as environment variables. No `.env` file or build is needed.
 > See the [deployment guide](docs/deployment.md).
 
 ## Connect to Hermes
@@ -61,10 +62,36 @@ Use any OpenAI-compatible client:
 | API key | Printed by `setup`; show it again with `./hermes key` |
 | Model | `hermes-agent` |
 
-Your **OpenAI key** pays for the model; your **Hermes API key** controls access to this
+Your **provider key** pays for the model; your **Hermes API key** controls access to this
 deployment. The API only accepts connections from the Docker host — use an SSH tunnel to
 connect from another computer. For Discord, remote access and other settings, see the
 [deployment guide](docs/deployment.md).
+
+## Use another model provider
+
+Hermes works with any API that follows the OpenAI chat-completions standard. Run
+`./hermes setup --reconfigure` and paste the provider's base URL, or set these in `.env`
+and run `./hermes up`:
+
+| Setting | Example |
+| --- | --- |
+| `LLM_BASE_URL` | `https://openrouter.ai/api/v1` |
+| `LLM_API_KEY` | Your provider key (leave empty for local servers) |
+| `HERMES_MODEL` | A model name the provider offers, e.g. `anthropic/claude-sonnet-4` |
+
+| Provider | `LLM_BASE_URL` |
+| --- | --- |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| Groq | `https://api.groq.com/openai/v1` |
+| Together AI | `https://api.together.xyz/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Ollama on this computer | `http://host.docker.internal:11434/v1` |
+| LM Studio on this computer | `http://host.docker.internal:1234/v1` |
+
+Leave `LLM_BASE_URL` empty to use OpenAI. Servers on your own computer must be addressed
+as `host.docker.internal`, because `localhost` inside a container is the container itself.
+The model must support tool calling for Hermes to run commands.
 
 ## Use your skills
 
@@ -133,7 +160,8 @@ request. Never publish tokens, private keys, `.env` files or sensitive data.
 | Symptom | First thing to check |
 | --- | --- |
 | `setup` or `up` fails | It prints recent logs. Check disk space, memory and Docker access. Do not share logs without checking for secrets. |
-| Model requests fail | Check `OPENAI_API_KEY`, account quota, and access to `HERMES_MODEL`. A healthy start is not a paid inference test. |
+| Model requests fail | Check the provider key, quota, `LLM_BASE_URL` and that `HERMES_MODEL` exists there. A healthy start is not a paid inference test. |
+| Local model server unreachable | Use `http://host.docker.internal:<port>/v1`, and make sure the server listens on all interfaces, not only `127.0.0.1` (Linux). |
 | API returns `401` or `403` | Use the Hermes API key (`./hermes key`), not your OpenAI key. |
 | Client cannot reach port 8000 | It binds to host loopback. Use the host itself or an SSH tunnel. Change the port with `HERMES_API_PORT`. |
 | Edited `.env` has no effect | Run `./hermes up`, not just a restart. |

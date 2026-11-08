@@ -12,7 +12,7 @@
 | `docker/prepare-gateway.sh`, `docker/skills-owner.sh` | Gateway startup hooks wired into upstream's s6 `cont-init.d`. |
 | `docker/sandbox.py` | Sandbox entrypoint (host key, sshd) and health check. |
 | `tests/test_deployment.py`, `tests/test_cli.py` | Unit tests; no Docker daemon needed. |
-| `tests/smoke.py` | End-to-end test against real containers. |
+| `tests/smoke.py`, `tests/fake_llm.py` | End-to-end test against real containers, with a fake OpenAI-compatible model server. |
 
 ## Validate
 
@@ -28,8 +28,9 @@ The smoke test uses its own Compose project and synthetic credentials, never rea
 `.env`, and removes its containers, volumes and images. It deploys through `./hermes`
 and verifies API authentication, that Hermes' own terminal tool runs in the sandbox with
 skills synced, credential isolation and limits, the import/activate/export workflow,
-symlink rejection, backup/restore, and persistence across recreation. It does not
-exercise paid inference or live Discord login.
+symlink rejection, backup/restore, persistence across recreation, and a full chat
+through the API routed to a fake OpenAI-compatible provider (checking the endpoint, key
+and model Hermes uses). It does not exercise paid inference or live Discord login.
 
 ## CI and releases
 

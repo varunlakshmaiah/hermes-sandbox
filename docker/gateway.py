@@ -32,6 +32,7 @@ PLACEHOLDERS = {
     "OPENAI_API_KEY": "your_openai_api_key_here",
     "DISCORD_BOT_TOKEN": "your_discord_token_here_optional",
 }
+STALE_MODEL_KEYS = ("base_url", "key_env", "api_key_env", "api_key", "api_mode")
 ALLOW_ALL_SETTINGS = ("DISCORD_ALLOW_ALL_USERS", "GATEWAY_ALLOW_ALL_USERS")
 SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_SKILL_BYTES = 256 * 1024 * 1024
@@ -107,10 +108,37 @@ def load_config(path, yaml):
     return config
 
 
-def apply_config(config, private):
-    section(config, "model", allow_string=True).update(
-        provider="openai", default=setting("HERMES_MODEL") or DEFAULT_MODEL
-    )
+def llm_settings():
+    """Model section and credentials for OpenAI, or any OpenAI-compatible endpoint."""
+    base_url = setting("LLM_BASE_URL").rstrip("/")
+    model = setting("HERMES_MODEL")
+    credentials = {"OPENAI_API_KEY": setting("OPENAI_API_KEY"), "LLM_API_KEY": setting("LLM_API_KEY")}
+    if not base_url:
+        key = credentials["OPENAI_API_KEY"] or credentials["LLM_API_KEY"]
+        if not key:
+            raise ValueError(
+                "Set OPENAI_API_KEY (run ./hermes setup), or LLM_BASE_URL and HERMES_MODEL "
+                "for another OpenAI-compatible provider"
+            )
+        return {"provider": "openai", "default": model or DEFAULT_MODEL}, {
+            **credentials,
+            "OPENAI_API_KEY": key,
+        }
+    if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", base_url):
+        raise ValueError("LLM_BASE_URL must be an http(s) URL, e.g. https://openrouter.ai/api/v1")
+    if not model:
+        raise ValueError("Set HERMES_MODEL to a model name offered by LLM_BASE_URL")
+    model_section = {"provider": "custom", "base_url": base_url, "default": model}
+    if credentials["LLM_API_KEY"]:
+        model_section["key_env"] = "LLM_API_KEY"
+    return model_section, credentials
+
+
+def apply_config(config, private, model):
+    current = section(config, "model", allow_string=True)
+    for name in STALE_MODEL_KEYS:
+        current.pop(name, None)
+    current.update(model)
     section(config, "terminal").update(
         backend="ssh",
         cwd=SANDBOX_HOME,
@@ -136,10 +164,10 @@ def check_access_policy(config):
         )
 
 
-def managed_env(private, key, api):
+def managed_env(private, credentials, api):
     # Upstream loads $HERMES_HOME/.env with override=True, so it must agree with us.
     return {
-        "OPENAI_API_KEY": key,
+        **credentials,
         "DISCORD_BOT_TOKEN": setting("DISCORD_BOT_TOKEN"),
         "DISCORD_ALLOWED_USERS": setting("DISCORD_ALLOWED_USERS"),
         "DISCORD_ALLOW_ALL_USERS": "false",
@@ -160,19 +188,17 @@ def configure():
     import hermes_yaml as yaml
     from dotenv import set_key
 
-    key = setting("OPENAI_API_KEY")
-    if not key:
-        raise ValueError("Set OPENAI_API_KEY (run ./hermes setup, or add it to .env) before deploying")
+    model, credentials = llm_settings()
     path = HOME / "config.yaml"
     config = load_config(path, yaml)
     check_access_policy(config)
     private = client_key()
-    atomic_write(path, yaml.safe_dump(apply_config(config, private), sort_keys=False))
+    atomic_write(path, yaml.safe_dump(apply_config(config, private, model), sort_keys=False))
     api = api_key()
     dotenv = HOME / ".env"
     dotenv.touch(mode=0o600, exist_ok=True)
     dotenv.chmod(0o600)
-    for name, value in managed_env(private, key, api).items():
+    for name, value in managed_env(private, credentials, api).items():
         set_key(dotenv, name, value)
 
 

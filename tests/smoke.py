@@ -2,7 +2,8 @@
 
 Builds both images, deploys through ./hermes, and checks: API auth, that Hermes'
 own terminal tool executes in the sandbox (with native skill sync), isolation and
-limits, the CLI skill workflow, backup/restore, and persistence across recreation.
+limits, the CLI skill workflow, backup/restore, persistence across recreation, and
+chat through an OpenAI-compatible provider (a local fake endpoint; no paid calls).
 """
 
 import json
@@ -17,6 +18,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "synthetic-smoke-api-token-not-a-real-secret"
+LLM_KEY = "synthetic-llm-key"
 MARKER = "smoke-skill-marker"
 
 
@@ -232,9 +234,50 @@ result = subprocess.check_output([
     'sandbox@hermes-sandbox', 'cat /workspace/smoke-persistence'], text=True)
 assert result == 'persistent', result
 """)
+        # Any OpenAI-compatible provider: point Hermes at a fake endpoint and chat through the API.
+        with dotenv.open("a") as stream:
+            stream.write(
+                f"LLM_BASE_URL=http://127.0.0.1:9999/v1\nLLM_API_KEY={LLM_KEY}\nHERMES_MODEL=smoke-model\n"
+            )
+        cli("up")
+        compose("cp", str(ROOT / "tests/fake_llm.py"), "hermes-gateway:/tmp/fake_llm.py")
+        compose(
+            "exec",
+            "-d",
+            "--user",
+            "hermes",
+            "hermes-gateway",
+            "/opt/hermes/.venv/bin/python",
+            "/tmp/fake_llm.py",
+            "9999",
+            "/tmp/fake_llm.log",
+        )
+        gateway(f"""
+import json, time
+from urllib.request import Request, urlopen
+for _ in range(100):
+    try:
+        urlopen('http://127.0.0.1:9999/v1/models', timeout=2)
+        break
+    except OSError:
+        time.sleep(0.2)
+token = open('/opt/data/.deployment/api-key').read().strip()
+message = {{'role': 'user', 'content': 'Say anything.'}}
+body = json.dumps({{'model': 'hermes-agent', 'messages': [message]}}).encode()
+request = Request('http://127.0.0.1:8000/v1/chat/completions', data=body,
+    headers={{'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}})
+with urlopen(request, timeout=300) as response:
+    reply = json.load(response)
+assert 'fake-llm-reply' in reply['choices'][0]['message']['content'], reply
+calls = [json.loads(line) for line in open('/tmp/fake_llm.log')]
+chats = [entry for entry in calls if entry['path'].endswith('/chat/completions')]
+assert chats, 'Hermes never called the configured endpoint'
+assert all(entry['authorization'] == 'Bearer {LLM_KEY}' for entry in chats), chats
+assert all(entry['body'].get('model') == 'smoke-model' for entry in chats), chats
+""")
         print(
             "PASS: CLI setup/import/activate/export/backup/restore, API auth, Hermes SSH terminal + "
-            "skill sync, link rejection, isolation, limits, persistence"
+            "skill sync, link rejection, isolation, limits, persistence, OpenAI-compatible provider"
         )
     finally:
         compose("logs", "--no-color", "--tail", "80", check=False)
