@@ -1,5 +1,5 @@
 # Pinned upstream release; Dependabot proposes updates, CI smoke-tests them.
-FROM nousresearch/hermes-agent:v0.23.0@sha256:adb7890916de63245523492be8f68f9d2095fecbec4e2a6dab7960381f0fc002
+FROM nousresearch/hermes-agent:v0.23.1@sha256:276d44685c65c0cb2a25f190b63c65c8906f9dc76486fb1c05ae71b5826bda08
 
 LABEL org.opencontainers.image.source="https://github.com/varunlakshmaiah/hermes-sandbox" \
       org.opencontainers.image.description="Hermes Agent gateway that executes commands in an SSH sandbox"
